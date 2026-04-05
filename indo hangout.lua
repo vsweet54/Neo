@@ -5,14 +5,14 @@ local StarterGui = game:GetService("StarterGui")
 local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
-local EventsRemote   = ReplicatedStorage:WaitForChild("Events")
-local RemoteEvent    = EventsRemote:WaitForChild("RemoteEvent")
-local RemoteFunction = EventsRemote:WaitForChild("RemoteFunction")
+local EventsRemote    = ReplicatedStorage:WaitForChild("Events")
+local RemoteEvent     = EventsRemote:WaitForChild("RemoteEvent")
+local RemoteFunction  = EventsRemote:WaitForChild("RemoteFunction")
 
-local RodRemote    = RemoteEvent:WaitForChild("Rod")
-local EquipToolsRF = RemoteFunction:WaitForChild("EquipTools")
-local SellFishRF   = RemoteFunction:WaitForChild("SellFish")
-local RodShopRF    = RemoteFunction:WaitForChild("RodShop")
+local RodRemote       = RemoteEvent:WaitForChild("Rod")
+local EquipToolsRF    = RemoteFunction:WaitForChild("EquipTools")
+local SellFishRF      = RemoteFunction:WaitForChild("SellFish")
+local RodShopRF       = RemoteFunction:WaitForChild("RodShop")
 
 local BloxbizRemotes = ReplicatedStorage:WaitForChild("BloxbizRemotes")
 local SendGuiImpRE   = BloxbizRemotes:WaitForChild("OnSendGuiImpressions")
@@ -126,7 +126,7 @@ local function solveMinigame(reelStartTime)
     task.wait(0.1)
 
     local whiteBar, redBar = getBarParts()
-    if not whiteBar or not redBar then minigameActive = false; return end
+    if not whiteBar or not redBar then return end
 
     local snapConn
     snapConn = RunService.RenderStepped:Connect(function()
@@ -166,7 +166,7 @@ local function setupReelingWatch(Reeling)
             biteEvent:Fire()
             if not minigameActive and autoReel then
                 minigameActive = true
-                task.spawn(function() solveMinigame(t) end)
+                task.spawn(function() solveMinigame(t); minigameActive = false end)
             end
         else
             minigameActive = false
@@ -175,7 +175,7 @@ local function setupReelingWatch(Reeling)
     if Reeling.Enabled and running and not minigameActive and autoReel then
         biteEvent:Fire()
         minigameActive = true
-        task.spawn(function() solveMinigame(tick()) end)
+        task.spawn(function() solveMinigame(tick()); minigameActive = false end)
     end
 end
 
@@ -188,15 +188,10 @@ local function watchMinigame()
     end)
 end
 
--- [[ FIX: cek Reeling GUI langsung, bukan minigameActive/isThrowing ]]
-local function isReelingActive()
-    local r = LocalPlayer.PlayerGui:FindFirstChild("Reeling")
-    return r and r.Enabled or false
-end
-
 local function isAlreadyCasting()
     if minigameActive or isThrowing then return true end
-    return isReelingActive()
+    local r = LocalPlayer.PlayerGui:FindFirstChild("Reeling")
+    return r and r.Enabled or false
 end
 
 local function getRod()
@@ -212,6 +207,8 @@ local function getRod()
     end
 end
 
+-- forced = true: bypass autoEquip check (manual click dari UI)
+-- forced = false/nil: ikut setting autoEquip
 local function equip(forced)
     if not forced and not autoEquip then return end
     local char = LocalPlayer.Character
@@ -253,40 +250,23 @@ local function equip(forced)
     task.wait(0.3)
 end
 
--- [[ FIX throwRod: hapus cek Reeling (ikan blm gigit saat lempar)
---    Cukup fire remote + tunggu sebentar supaya server proses.
---    isThrowing di-reset pakai pcall+finally pattern biar ga stuck. ]]
 local function throwRod(rod)
     if not autoThrow then return false end
     if isAlreadyCasting() then return false end
-
-    isThrowing = true
-    throwTime  = tick()
-
-    local ok = pcall(function()
-        RodRemote:FireServer("Throw", rod, workspace:WaitForChild("Terrain"))
-    end)
-
-    -- Tunggu sebentar supaya server proses throw-nya
-    task.wait(0.5)
-    isThrowing = false
-
-    return ok  -- true kalau remote berhasil di-fire
+    isThrowing = true; throwTime = tick()
+    pcall(function() RodRemote:FireServer("Throw", rod, workspace:WaitForChild("Terrain")) end)
+    local check = 0
+    while check < 1 do
+        task.wait(0.1); check += 0.1
+        local r = LocalPlayer.PlayerGui:FindFirstChild("Reeling")
+        if r and r.Enabled then isThrowing = false; return true end
+    end
+    isThrowing = false; return true
 end
 
 local function catchFish(rod)
     pcall(function() RodRemote:FireServer("Catch", rod, false) end)
     task.wait(0.3)
-end
-
--- [[ FIX: tunggu Reeling benar-benar mati setelah catch ]]
-local function waitForReelingOff(maxSec)
-    maxSec = maxSec or 5
-    local t = 0
-    while t < maxSec do
-        if not isReelingActive() then return end
-        task.wait(0.1); t += 0.1
-    end
 end
 
 local KG_CATEGORY = {[50]="All under 50 Kg",[100]="All under 100 Kg",[400]="All under 400 Kg",[600]="All under 600 Kg",[0]="Sell All"}
@@ -312,82 +292,46 @@ local function sellFish(maxKg)
     end
 end
 
--- [[ FIXED startFishing: biteConn disambung SEBELUM throw biar ga race condition ]]
 local function startFishing()
     running = true
     notify("AutoFish", "Mulai!", 4)
     loopTask = task.spawn(function()
         while running do
             pcall(function()
-                -- Pastikan state bersih dulu
-                if isReelingActive() then task.wait(0.5); return end
-
-                -- Equip rod sekali
                 local rod = getRod()
-                if not rod then
-                    if autoEquip then equip(); task.wait(0.6) end
-                    rod = getRod()
-                end
-                if not rod then task.wait(0.5); return end
+                if not rod and autoEquip then equip(); task.wait(0.5); rod = getRod() end
+                if not rod or isAlreadyCasting() then task.wait(0.5); return end
 
-                -- Pastikan rod di-hold di karakter
+                if autoEquip then equip() end
                 local char = LocalPlayer.Character
-                if not char or not char:FindFirstChild(selectedRod) then
-                    if autoEquip then
-                        local hum = char and char:FindFirstChildOfClass("Humanoid")
-                        if hum then pcall(function() hum:EquipTool(rod) end) end
-                        task.wait(0.4)
-                    end
-                    rod = getRod()
-                    if not rod or not char:FindFirstChild(selectedRod) then
-                        task.wait(0.5); return
-                    end
-                end
-
-                if isAlreadyCasting() then task.wait(0.5); return end
-
-                -- [[ KUNCI FIX: sambung listener DULU baru throw ]]
-                local biteFired = false
-                local biteConn = biteEvent.Event:Connect(function()
-                    biteFired = true
-                end)
+                if not char or not char:FindFirstChild(selectedRod) then task.wait(0.5); return end
 
                 local thrown = throwRod(rod)
-                if not thrown then
-                    biteConn:Disconnect()
-                    task.wait(0.5); return
-                end
+                if not thrown then task.wait(0.5); return end
 
-                -- Tunggu ikan gigit
+                local biteFired = false
+                local biteConn = biteEvent.Event:Connect(function() biteFired = true end)
                 local avgBite = avg(history.throwToBite)
-                -- [[ FIX: default timeout 20s (bukan 60s) biar cepet retry kalau throw gagal ]]
-                local timeout = avgBite and math.max(avgBite * 2.5, 15) or 20
+                local timeout = avgBite and math.max(avgBite * 2.5, 15) or 60
                 local elapsed = 0
-                while not biteFired and elapsed < timeout and running do
-                    task.wait(0.1); elapsed += 0.1
-                end
+                while not biteFired and elapsed < timeout and running do task.wait(0.1); elapsed += 0.1 end
                 biteConn:Disconnect()
 
-                if not biteFired then
-                    -- Throw mungkin gagal di server, reset dan coba lagi
-                    throwTime = nil
-                    task.wait(0.3); return
-                end
-
-                -- Tunggu minigame selesai (max 30s)
+                if not biteFired then throwTime = nil; return end
                 local mg = 0
                 while minigameActive and mg < 30 do task.wait(0.1); mg += 0.1 end
 
-                -- [[ FIX: tunggu Reeling GUI benar-benar mati sebelum catch ]]
-                waitForReelingOff(4)
-                task.wait(0.2)
+                local rw = 0
+                while rw < 3 do
+                    local r = LocalPlayer.PlayerGui:FindFirstChild("Reeling")
+                    if not r or not r.Enabled then break end
+                    task.wait(0.1); rw += 0.1
+                end
 
+                task.wait(0.2)
                 catchFish(rod)
                 fishCount += 1
                 saveFishCount(fishCount)
-
-                -- [[ FIX: tunggu setelah catch biar server state reset dulu ]]
-                task.wait(0.5)
             end)
             task.wait(0.3)
         end
@@ -640,18 +584,19 @@ for i, rodName in ipairs(rodList) do
     btn.Font = Enum.Font.GothamBold
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
     rodBtns[i] = btn
-    btn.Activated:Connect(function()
-        selectedRod = rodName
-        for _, b in ipairs(rodBtns) do b.BackgroundColor3 = (b.Text == selectedRod and C.tabsel or C.tab) end
-        notify("Rod", selectedRod, 3)
-        if autoEquip then
-            task.spawn(function() equip(true) end)
-        else
-            task.spawn(function()
-                pcall(function() RodShopRF:InvokeServer("EquipRod", selectedRod) end)
-            end)
-        end
-    end)
+btn.Activated:Connect(function()
+    selectedRod = rodName
+    for _, b in ipairs(rodBtns) do b.BackgroundColor3 = (b.Text == selectedRod and C.tabsel or C.tab) end
+    notify("Rod", selectedRod, 3)
+    if autoEquip then
+        task.spawn(function() equip(true) end) -- pegang langsung
+    else
+        -- cuma daftarin ke server/backpack, ga pegang
+        task.spawn(function()
+            pcall(function() RodShopRF:InvokeServer("EquipRod", selectedRod) end)
+        end)
+    end
+end)
 end
 
 local function switchTab(idx)
@@ -667,9 +612,7 @@ switchTab(1)
 
 task.spawn(function()
     while true do task.wait(1)
-        statusLabel.Text = (running and (minigameActive and "REEL" or (isThrowing and "THROW" or "ON")) or "OFF")
-            .. " | Fish: " .. fishCount
-            .. " | " .. selectedRod
+        statusLabel.Text = (running and (minigameActive and "REEL" or (isThrowing and "THROW" or "ON")) or "OFF") .. " | " .. selectedRod
     end
 end)
 
