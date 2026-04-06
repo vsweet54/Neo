@@ -636,7 +636,7 @@ for _, data in ipairs(sellData) do
         task.spawn(function() sellFish(data[2]) end)
     end)
 end
-
+table.sort(rodList, function(a, b) return a < b end)
 -- Tab ROD
 local rodTab = win:CreateTab("ROD")
 rodTab:AddLabel("Pilih Rod:")
